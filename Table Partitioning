@@ -1,0 +1,2019 @@
+
+Table Partitioning from basics to advanced, with practical T-SQL scripts using Microsoft sample databases (like AdventureWorks, WideWorldImporters, etc.) for SQL Server 2019-2025.
+
+1) Introduction to Table Partitioning
+2) Prerequisites & Setup
+3) Partition Functions
+4) Partition Schemes
+5) Creating Partitioned Tables
+6) Partition Alignment
+7) Querying Partitioned Tables
+8) Partition Switching
+9) Partition Merging & Splitting
+10)Partitioned Indexes
+11)Monitoring & Maintenance
+12)Advanced Scenarios
+13)Real-world scenarios with AdventureWorks
+============================================================================
+Comprehensive T-SQL scripts.
+/*
+================================================================================
+  SQL SERVER TABLE PARTITIONING — COMPLETE GUIDE (2019 to 2025)
+  From Basics to Advanced | Real-World Scenarios | AdventureWorks + Custom Labs
+================================================================================
+  CONTENTS
+  ─────────────────────────────────────────────────────────────────────────────
+  MODULE 01  Core Concepts & Architecture
+  MODULE 02  Lab Environment Setup (Filegroups & Sample DB)
+  MODULE 03  Partition Functions — All Types
+  MODULE 04  Partition Schemes
+  MODULE 05  Creating Partitioned Tables from Scratch
+  MODULE 06  Partitioning an Existing Table (AdventureWorks)
+  MODULE 07  Partitioned Indexes — Aligned & Non-Aligned
+  MODULE 08  Partition Switching (Fast Load / Archive / Slide-Window)
+  MODULE 09  Splitting & Merging Partitions
+  MODULE 10  Querying Partitioned Data — Partition Elimination
+  MODULE 11  Monitoring & Diagnostics
+  MODULE 12  Maintenance — Statistics, Rebuilds, Compression
+  MODULE 13  Advanced: Sliding Window Pattern (Full Automation)
+  MODULE 14  Advanced: Partitioned Views vs Table Partitioning
+  MODULE 15  Advanced: In-Memory OLTP + Partitioning (2019+)
+  MODULE 16  Advanced: Columnstore + Partitioned Tables (Delta Store)
+  MODULE 17  Advanced: Row-Level Security on Partitioned Tables
+  MODULE 18  Advanced: Partitioning on Multiple Columns (Workaround)
+  MODULE 19  Troubleshooting & Common Pitfalls
+  MODULE 20  Real-World Scenario Checklists
+  ─────────────────────────────────────────────────────────────────────────────
+  Prerequisites : SQL Server 2019+ | AdventureWorks2019 | sysadmin or db_owner
+  Download AW   : https://github.com/Microsoft/sql-server-samples
+================================================================================
+*/
+
+/* ============================================================================
+   MODULE 01 — CORE CONCEPTS & ARCHITECTURE
+   ============================================================================
+   • A partitioned table is split into multiple physical units (partitions) based on values in one PARTITION COLUMN.
+   • Partitioning is transparent to queries; SQL Server routes rows automatically.
+   • Key Objects:
+       PARTITION FUNCTION  → defines the boundary values & direction (LEFT/RIGHT)
+       PARTITION SCHEME    → maps each partition to a filegroup
+       TABLE / INDEX       → created ON the partition scheme
+   • Max partitions per table: 15,000 (SQL Server 2012+)
+   • Partition column must be NOT NULL (or NULLs go to partition 1).
+   ============================================================================ */
+
+-- Quick anatomy check on an existing partitioned table (run after Module 06)
+-- SELECT * FROM sys.partitions WHERE object_id = OBJECT_ID('Sales.SalesOrderHeader');
+
+/* ============================================================================
+   MODULE 02 — LAB ENVIRONMENT SETUP
+   ============================================================================ */
+
+-- ── 2.1  Create a dedicated lab database ─────────────────────────────────────
+USE master;
+GO
+
+IF DB_ID('PartitionLab') IS NOT NULL
+    DROP DATABASE PartitionLab;
+GO
+
+CREATE DATABASE PartitionLab
+ON PRIMARY
+(   NAME = 'PartitionLab_Primary',
+    FILENAME = 'C:\SQLData\PartitionLab.mdf',
+    SIZE = 256MB, MAXSIZE = UNLIMITED, FILEGROWTH = 64MB
+),
+-- One filegroup per year / partition boundary (best practice)
+FILEGROUP FG_2019
+(   NAME = 'PartitionLab_2019',
+    FILENAME = 'C:\SQLData\PartitionLab_2019.ndf',
+    SIZE = 64MB, FILEGROWTH = 32MB
+),
+FILEGROUP FG_2020
+(   NAME = 'PartitionLab_2020',
+    FILENAME = 'C:\SQLData\PartitionLab_2020.ndf',
+    SIZE = 64MB, FILEGROWTH = 32MB
+),
+FILEGROUP FG_2021
+(   NAME = 'PartitionLab_2021',
+    FILENAME = 'C:\SQLData\PartitionLab_2021.ndf',
+    SIZE = 64MB, FILEGROWTH = 32MB
+),
+FILEGROUP FG_2022
+(   NAME = 'PartitionLab_2022',
+    FILENAME = 'C:\SQLData\PartitionLab_2022.ndf',
+    SIZE = 64MB, FILEGROWTH = 32MB
+),
+FILEGROUP FG_2023
+(   NAME = 'PartitionLab_2023',
+    FILENAME = 'C:\SQLData\PartitionLab_2023.ndf',
+    SIZE = 64MB, FILEGROWTH = 32MB
+),
+FILEGROUP FG_2024
+(   NAME = 'PartitionLab_2024',
+    FILENAME = 'C:\SQLData\PartitionLab_2024.ndf',
+    SIZE = 64MB, FILEGROWTH = 32MB
+),
+FILEGROUP FG_FUTURE   -- staging / overflow
+(   NAME = 'PartitionLab_Future',
+    FILENAME = 'C:\SQLData\PartitionLab_Future.ndf',
+    SIZE = 64MB, FILEGROWTH = 32MB
+),
+FILEGROUP FG_STAGING  -- used for partition switching
+(   NAME = 'PartitionLab_Staging',
+    FILENAME = 'C:\SQLData\PartitionLab_Staging.ndf',
+    SIZE = 64MB, FILEGROWTH = 32MB
+)
+LOG ON
+(   NAME = 'PartitionLab_Log',
+    FILENAME = 'C:\SQLData\PartitionLab_Log.ldf',
+    SIZE = 64MB, FILEGROWTH = 64MB
+);
+GO
+
+-- ── 2.2  NOTE on paths ────────────────────────────────────────────────────────
+-- Adjust the file paths above to match your SQL Server instance.
+-- In a lab you can use: 'C:\Program Files\Microsoft SQL Server\...\DATA\'
+-- Or use default data directory via xp_instance_regread.
+
+-- ── 2.3  Add filegroups to AdventureWorks2019 (for Module 06) ────────────────
+USE master;
+GO
+ALTER DATABASE AdventureWorks2019
+ADD FILEGROUP FG_AW_2011;
+ALTER DATABASE AdventureWorks2019
+ADD FILE (NAME='AW_2011', FILENAME='C:\SQLData\AW_2011.ndf', SIZE=64MB)
+TO FILEGROUP FG_AW_2011;
+
+ALTER DATABASE AdventureWorks2019 ADD FILEGROUP FG_AW_2012;
+ALTER DATABASE AdventureWorks2019
+ADD FILE (NAME='AW_2012', FILENAME='C:\SQLData\AW_2012.ndf', SIZE=64MB)
+TO FILEGROUP FG_AW_2012;
+
+ALTER DATABASE AdventureWorks2019 ADD FILEGROUP FG_AW_2013;
+ALTER DATABASE AdventureWorks2019
+ADD FILE (NAME='AW_2013', FILENAME='C:\SQLData\AW_2013.ndf', SIZE=64MB)
+TO FILEGROUP FG_AW_2013;
+
+ALTER DATABASE AdventureWorks2019 ADD FILEGROUP FG_AW_2014;
+ALTER DATABASE AdventureWorks2019
+ADD FILE (NAME='AW_2014', FILENAME='C:\SQLData\AW_2014.ndf', SIZE=64MB)
+TO FILEGROUP FG_AW_2014;
+
+ALTER DATABASE AdventureWorks2019 ADD FILEGROUP FG_AW_STAGING;
+ALTER DATABASE AdventureWorks2019
+ADD FILE (NAME='AW_Staging', FILENAME='C:\SQLData\AW_Staging.ndf', SIZE=64MB)
+TO FILEGROUP FG_AW_STAGING;
+GO
+
+
+/* ============================================================================
+   MODULE 03 — PARTITION FUNCTIONS
+   ============================================================================
+   Syntax:
+     CREATE PARTITION FUNCTION function_name (data_type)
+     AS RANGE LEFT | RIGHT
+     FOR VALUES (boundary_list);
+
+   LEFT  → boundary value belongs to the LEFT (lower) partition
+   RIGHT → boundary value belongs to the RIGHT (upper) partition
+   ============================================================================ */
+
+USE PartitionLab;
+GO
+
+-- ── 3.1  RANGE RIGHT — most common for dates ──────────────────────────────────
+-- Boundary: Jan 1 of each year
+-- Partition 1 : < '2019-01-01'
+-- Partition 2 : >= '2019-01-01' AND < '2020-01-01'
+-- Partition 3 : >= '2020-01-01' AND < '2021-01-01'  ... and so on
+
+CREATE PARTITION FUNCTION PF_SalesOrder_Year (DATE)
+AS RANGE RIGHT
+FOR VALUES (
+    '2019-01-01',
+    '2020-01-01',
+    '2021-01-01',
+    '2022-01-01',
+    '2023-01-01',
+    '2024-01-01'
+);
+GO
+
+-- ── 3.2  RANGE LEFT — boundary value goes to lower partition ──────────────────
+-- Partition 1 : <= '2019-12-31'
+-- Partition 2 : > '2019-12-31' AND <= '2020-12-31' ...
+
+CREATE PARTITION FUNCTION PF_SalesOrder_Year_LEFT (DATE)
+AS RANGE LEFT
+FOR VALUES (
+    '2019-12-31',
+    '2020-12-31',
+    '2021-12-31',
+    '2022-12-31',
+    '2023-12-31'
+);
+GO
+
+-- ── 3.3  Monthly partitioning (high-frequency OLTP) ──────────────────────────
+CREATE PARTITION FUNCTION PF_Monthly (DATE)
+AS RANGE RIGHT
+FOR VALUES (
+    '2024-01-01','2024-02-01','2024-03-01','2024-04-01',
+    '2024-05-01','2024-06-01','2024-07-01','2024-08-01',
+    '2024-09-01','2024-10-01','2024-11-01','2024-12-01',
+    '2025-01-01'
+);
+GO
+
+-- ── 3.4  Integer-based partition (Customer ID range) ─────────────────────────
+CREATE PARTITION FUNCTION PF_CustomerID (INT)
+AS RANGE RIGHT
+FOR VALUES (10000, 20000, 30000, 40000, 50000);
+-- Partition 1: < 10000  | P2: 10000-19999 | P3: 20000-29999 ... | P6: >= 50000
+GO
+
+-- ── 3.5  BIGINT partition for high-volume event IDs ──────────────────────────
+CREATE PARTITION FUNCTION PF_EventID (BIGINT)
+AS RANGE RIGHT
+FOR VALUES (1000000, 2000000, 3000000, 4000000, 5000000);
+GO
+
+-- ── 3.6  DATETIME2 precision partition ───────────────────────────────────────
+CREATE PARTITION FUNCTION PF_Transactions_DateTime (DATETIME2(0))
+AS RANGE RIGHT
+FOR VALUES (
+    '2024-01-01 00:00:00',
+    '2024-04-01 00:00:00',
+    '2024-07-01 00:00:00',
+    '2024-10-01 00:00:00',
+    '2025-01-01 00:00:00'
+);
+GO
+
+-- ── 3.7  Verify partition function boundaries ─────────────────────────────────
+SELECT
+    pf.name                         AS PartitionFunction,
+    pf.type_desc                    AS BoundaryType,
+    pf.fanout                       AS NumberOfPartitions,
+    prv.boundary_id                 AS BoundaryID,
+    CAST(prv.value AS VARCHAR(50))  AS BoundaryValue
+FROM sys.partition_functions  pf
+JOIN sys.partition_range_values prv
+    ON pf.function_id = prv.function_id
+ORDER BY pf.name, prv.boundary_id;
+GO
+
+-- ── 3.8  Test which partition a value maps to ─────────────────────────────────
+SELECT $PARTITION.PF_SalesOrder_Year('2021-06-15') AS PartitionNumber;
+-- Returns 3 (the 2021 partition)
+
+SELECT $PARTITION.PF_SalesOrder_Year('2018-12-31') AS PartitionNumber;
+-- Returns 1 (before all boundaries — the "catch-all" left partition)
+
+SELECT $PARTITION.PF_CustomerID(25500) AS PartitionNumber;
+-- Returns 3
+
+
+/* ============================================================================
+   MODULE 04 — PARTITION SCHEMES
+   ============================================================================
+   A Partition Scheme maps each partition to a filegroup.
+   Number of filegroups = Number of partitions = Number of boundaries + 1
+   You can also map ALL partitions to [PRIMARY] or a single FG (simpler lab).
+   ============================================================================ */
+
+-- ── 4.1  Named filegroup per partition (production best practice) ─────────────
+CREATE PARTITION SCHEME PS_SalesOrder_Year
+AS PARTITION PF_SalesOrder_Year
+TO (
+    [PRIMARY],    -- Partition 1: rows before 2019
+    FG_2019,      -- Partition 2: 2019 rows
+    FG_2020,      -- Partition 3: 2020 rows
+    FG_2021,      -- Partition 4: 2021 rows
+    FG_2022,      -- Partition 5: 2022 rows
+    FG_2023,      -- Partition 6: 2023 rows
+    FG_2024,      -- Partition 7: 2024 rows
+    FG_FUTURE     -- Partition 8: >= 2025
+);
+GO
+
+-- ── 4.2  NEXT USED — designate filegroup for the next split ──────────────────
+-- Required BEFORE you split a partition (Module 09)
+ALTER PARTITION SCHEME PS_SalesOrder_Year
+NEXT USED FG_FUTURE;
+GO
+
+-- ── 4.3  All-to-PRIMARY scheme (simple lab / dev environment) ─────────────────
+CREATE PARTITION SCHEME PS_SalesOrder_Year_Simple
+AS PARTITION PF_SalesOrder_Year
+ALL TO ([PRIMARY]);
+GO
+
+-- ── 4.4  Monthly scheme ───────────────────────────────────────────────────────
+CREATE PARTITION SCHEME PS_Monthly
+AS PARTITION PF_Monthly
+ALL TO ([PRIMARY]);
+GO
+
+-- ── 4.5  Customer ID scheme ───────────────────────────────────────────────────
+CREATE PARTITION SCHEME PS_CustomerID
+AS PARTITION PF_CustomerID
+ALL TO ([PRIMARY]);
+GO
+
+-- ── 4.6  Verify partition schemes ─────────────────────────────────────────────
+SELECT
+    ps.name             AS PartitionScheme,
+    pf.name             AS PartitionFunction,
+    dds.destination_id  AS PartitionNumber,
+    fg.name             AS Filegroup
+FROM sys.partition_schemes    ps
+JOIN sys.partition_functions  pf  ON ps.function_id = pf.function_id
+JOIN sys.destination_data_spaces dds ON ps.data_space_id = dds.partition_scheme_id
+JOIN sys.filegroups           fg  ON dds.data_space_id = fg.data_space_id
+ORDER BY ps.name, dds.destination_id;
+GO
+
+
+/* ============================================================================
+   MODULE 05 — CREATING PARTITIONED TABLES FROM SCRATCH
+   ============================================================================ */
+
+USE PartitionLab;
+GO
+
+-- ── 5.1  Simple partitioned fact table ───────────────────────────────────────
+CREATE TABLE dbo.FactSalesOrder
+(
+    SalesOrderID    INT          NOT NULL,
+    OrderDate       DATE         NOT NULL,   -- ← PARTITION COLUMN
+    CustomerID      INT          NOT NULL,
+    SalesPersonID   INT          NULL,
+    TotalDue        MONEY        NOT NULL DEFAULT 0,
+    Status          TINYINT      NOT NULL DEFAULT 1,
+    CreatedAt       DATETIME2(0) NOT NULL DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT PK_FactSalesOrder
+        PRIMARY KEY CLUSTERED (SalesOrderID, OrderDate)  -- PK must include partition col
+        ON PS_SalesOrder_Year (OrderDate)                -- route to partition scheme
+)
+ON PS_SalesOrder_Year (OrderDate);
+GO
+
+-- ── 5.2  Partitioned table with IDENTITY and heap-then-index approach ─────────
+CREATE TABLE dbo.FactTransaction
+(
+    TransactionID   BIGINT       IDENTITY(1,1) NOT NULL,
+    TxnDate         DATE         NOT NULL,
+    AccountID       INT          NOT NULL,
+    Amount          DECIMAL(18,4) NOT NULL,
+    TxnType         CHAR(1)      NOT NULL CHECK (TxnType IN ('D','C')),
+    Narration       NVARCHAR(256) NULL
+)
+ON PS_SalesOrder_Year (TxnDate);
+GO
+
+-- Non-unique clustered index on partition col (common pattern when IDENTITY is PK)
+CREATE CLUSTERED INDEX CIX_FactTransaction_TxnDate
+    ON dbo.FactTransaction (TxnDate)
+    ON PS_SalesOrder_Year (TxnDate);
+GO
+
+-- ── 5.3  Partitioned by integer (Customer segments) ──────────────────────────
+CREATE TABLE dbo.DimCustomerActivity
+(
+    ActivityID      INT          IDENTITY(1,1) NOT NULL,
+    CustomerID      INT          NOT NULL,   -- ← PARTITION COLUMN
+    ActivityDate    DATE         NOT NULL,
+    ActivityType    VARCHAR(50)  NOT NULL,
+    Score           SMALLINT     NULL
+)
+ON PS_CustomerID (CustomerID);
+GO
+
+-- ── 5.4  Load sample data into FactSalesOrder ─────────────────────────────────
+-- Generate ~100,000 rows spread across 2019–2024
+;WITH Numbers AS (
+    SELECT TOP (100000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n
+    FROM sys.all_columns a CROSS JOIN sys.all_columns b
+)
+INSERT INTO dbo.FactSalesOrder (SalesOrderID, OrderDate, CustomerID, SalesPersonID, TotalDue, Status)
+SELECT
+    n                                                         AS SalesOrderID,
+    DATEADD(DAY, ABS(CHECKSUM(NEWID())) % 2191, '2019-01-01') AS OrderDate,  -- 6 yrs
+    ABS(CHECKSUM(NEWID())) % 50000 + 1                        AS CustomerID,
+    ABS(CHECKSUM(NEWID())) % 20  + 1                          AS SalesPersonID,
+    CAST(ABS(CHECKSUM(NEWID())) % 50000 / 100.0 AS MONEY)     AS TotalDue,
+    1
+FROM Numbers;
+GO
+
+-- ── 5.5  Verify row distribution across partitions ────────────────────────────
+SELECT
+    p.partition_number,
+    p.rows,
+    CAST(prv.value AS VARCHAR(20)) AS BoundaryValue,
+    fg.name                         AS Filegroup
+FROM sys.partitions          p
+JOIN sys.indexes             i   ON p.object_id = i.object_id AND p.index_id = i.index_id
+JOIN sys.partition_schemes   ps  ON i.data_space_id = ps.data_space_id
+JOIN sys.partition_functions pf  ON ps.function_id = pf.function_id
+LEFT JOIN sys.partition_range_values prv
+    ON pf.function_id = prv.function_id
+    AND p.partition_number = prv.boundary_id + 1   -- RIGHT boundary offset
+JOIN sys.destination_data_spaces dds ON ps.data_space_id = dds.partition_scheme_id
+    AND dds.destination_id = p.partition_number
+JOIN sys.filegroups          fg  ON dds.data_space_id = fg.data_space_id
+WHERE p.object_id = OBJECT_ID('dbo.FactSalesOrder')
+  AND i.index_id  <= 1   -- clustered only
+ORDER BY p.partition_number;
+GO
+
+
+/* ============================================================================
+   MODULE 06 — PARTITIONING AN EXISTING TABLE (AdventureWorks2019)
+   ============================================================================
+   Real-World Scenario: The Sales.SalesOrderHeader table in AdventureWorks
+   grows by millions of rows per year. Partition it by OrderDate.
+   ============================================================================ */
+
+USE AdventureWorks2019;
+GO
+
+-- ── 6.1  Examine the existing table ──────────────────────────────────────────
+SELECT
+    MIN(OrderDate) AS MinDate,
+    MAX(OrderDate) AS MaxDate,
+    COUNT(*)       AS TotalRows
+FROM Sales.SalesOrderHeader;
+
+-- ── 6.2  Create Partition Function & Scheme in AdventureWorks ─────────────────
+CREATE PARTITION FUNCTION PF_AW_OrderYear (DATETIME)
+AS RANGE RIGHT
+FOR VALUES (
+    '2011-01-01',
+    '2012-01-01',
+    '2013-01-01',
+    '2014-01-01'
+);
+GO
+
+CREATE PARTITION SCHEME PS_AW_OrderYear
+AS PARTITION PF_AW_OrderYear
+TO (
+    [PRIMARY],
+    FG_AW_2011,
+    FG_AW_2012,
+    FG_AW_2013,
+    FG_AW_2014,
+    [PRIMARY]    -- 2014+ overflow
+);
+GO
+
+-- ── 6.3  Strategy: DROP existing PK, recreate on partition scheme ──────────────
+--  IMPORTANT: To partition an existing table with a clustered PK, you must:
+--  1. Drop the clustered PK (this becomes a heap)
+--  2. Recreate the PK / clustered index ON the partition scheme
+--  WARNING: On large tables, do this in a maintenance window!
+
+-- Step A: Script the existing PK (for rollback)
+-- PK is: SalesOrderID
+-- We need to include OrderDate in the key to align with partition scheme
+
+-- Step B: Check for foreign keys referencing this table
+SELECT
+    fk.name          AS FK_Name,
+    OBJECT_NAME(fk.parent_object_id) AS ChildTable
+FROM sys.foreign_keys fk
+WHERE fk.referenced_object_id = OBJECT_ID('Sales.SalesOrderHeader');
+
+-- Step C: Disable FK constraints temporarily
+ALTER TABLE Sales.SalesOrderDetail NOCHECK CONSTRAINT FK_SalesOrderDetail_SalesOrderHeader_SalesOrderID;
+GO
+
+-- Step D: Drop the existing clustered PK
+ALTER TABLE Sales.SalesOrderHeader
+DROP CONSTRAINT PK_SalesOrderHeader_SalesOrderID;
+GO
+
+-- Step E: Recreate as partitioned clustered PK (include OrderDate)
+ALTER TABLE Sales.SalesOrderHeader
+ADD CONSTRAINT PK_SalesOrderHeader_SalesOrderID
+PRIMARY KEY CLUSTERED (SalesOrderID, OrderDate)
+ON PS_AW_OrderYear (OrderDate);
+GO
+
+-- Step F: Re-enable FK
+ALTER TABLE Sales.SalesOrderDetail
+CHECK CONSTRAINT FK_SalesOrderDetail_SalesOrderHeader_SalesOrderID;
+GO
+
+-- Step G: Verify partitions
+SELECT
+    p.partition_number,
+    p.rows,
+    CAST(prv.value AS VARCHAR(30)) AS BoundaryValue
+FROM sys.partitions p
+JOIN sys.indexes    i  ON p.object_id = i.object_id AND p.index_id = i.index_id
+JOIN sys.partition_schemes  ps ON i.data_space_id = ps.data_space_id
+JOIN sys.partition_functions pf ON ps.function_id = pf.function_id
+LEFT JOIN sys.partition_range_values prv
+    ON pf.function_id = prv.function_id
+    AND p.partition_number = prv.boundary_id + 1
+WHERE p.object_id = OBJECT_ID('Sales.SalesOrderHeader')
+  AND i.index_id <= 1
+ORDER BY p.partition_number;
+GO
+
+-- ── 6.4  Alternative: Partition WITHOUT changing the PK ───────────────────────
+-- Create a NEW partitioned table, copy data, rename (online approach)
+-- Safer for production systems!
+
+CREATE TABLE Sales.SalesOrderHeader_New
+(
+    SalesOrderID            INT              NOT NULL,
+    RevisionNumber          TINYINT          NOT NULL,
+    OrderDate               DATETIME         NOT NULL,
+    DueDate                 DATETIME         NOT NULL,
+    ShipDate                DATETIME         NULL,
+    Status                  TINYINT          NOT NULL,
+    OnlineOrderFlag         dbo.Flag         NOT NULL,
+    SalesOrderNumber        NVARCHAR(25)     NOT NULL,
+    PurchaseOrderNumber     dbo.OrderNumber  NULL,
+    AccountNumber           dbo.AccountNumber NULL,
+    CustomerID              INT              NOT NULL,
+    SalesPersonID           INT              NULL,
+    TerritoryID             INT              NULL,
+    BillToAddressID         INT              NOT NULL,
+    ShipToAddressID         INT              NOT NULL,
+    ShipMethodID            INT              NOT NULL,
+    CreditCardID            INT              NULL,
+    CreditCardApprovalCode  VARCHAR(15)      NULL,
+    CurrencyRateID          INT              NULL,
+    SubTotal                MONEY            NOT NULL,
+    TaxAmt                  MONEY            NOT NULL,
+    Freight                 MONEY            NOT NULL,
+    TotalDue                MONEY            NOT NULL,
+    Comment                 NVARCHAR(128)    NULL,
+    rowguid                 UNIQUEIDENTIFIER NOT NULL,
+    ModifiedDate            DATETIME         NOT NULL,
+    CONSTRAINT PK_SalesOrderHeader_New
+        PRIMARY KEY CLUSTERED (SalesOrderID, OrderDate)
+        ON PS_AW_OrderYear (OrderDate)
+)
+ON PS_AW_OrderYear (OrderDate);
+GO
+
+-- Copy data
+INSERT INTO Sales.SalesOrderHeader_New
+SELECT * FROM Sales.SalesOrderHeader;
+GO
+
+-- Rename tables (atomic swap)
+EXEC sp_rename 'Sales.SalesOrderHeader',     'SalesOrderHeader_Old';
+EXEC sp_rename 'Sales.SalesOrderHeader_New', 'SalesOrderHeader';
+GO
+-- After validation: DROP TABLE Sales.SalesOrderHeader_Old
+
+
+/* ============================================================================
+   MODULE 07 — PARTITIONED INDEXES
+   ============================================================================ */
+
+USE PartitionLab;
+GO
+
+-- ── 7.1  Aligned non-clustered index (same partition scheme as table) ─────────
+-- "Aligned" means the index uses the SAME partition function.
+-- Benefits: fast partition switch, per-partition rebuild, eliminate partitions.
+
+CREATE NONCLUSTERED INDEX IX_FactSalesOrder_CustomerID
+ON dbo.FactSalesOrder (CustomerID, OrderDate)
+INCLUDE (TotalDue)
+ON PS_SalesOrder_Year (OrderDate);   -- ← aligned
+GO
+
+CREATE NONCLUSTERED INDEX IX_FactSalesOrder_SalesPerson
+ON dbo.FactSalesOrder (SalesPersonID, OrderDate)
+INCLUDE (TotalDue, Status)
+ON PS_SalesOrder_Year (OrderDate);   -- ← aligned
+GO
+
+-- ── 7.2  Non-aligned index (entire index on one filegroup) ────────────────────
+-- Use when queries span many partitions and the index column ≠ partition key.
+-- Downside: partition switching is blocked until this index is dropped/disabled.
+
+CREATE NONCLUSTERED INDEX IX_FactSalesOrder_Status_NA
+ON dbo.FactSalesOrder (Status, TotalDue)
+ON [PRIMARY];    -- ← non-aligned (single filegroup)
+GO
+
+-- ── 7.3  Rebuild index for a SINGLE partition (online, minimal blocking) ──────
+ALTER INDEX IX_FactSalesOrder_CustomerID
+ON dbo.FactSalesOrder
+REBUILD PARTITION = 3   -- only rebuild the 2021 partition
+WITH (ONLINE = ON, DATA_COMPRESSION = ROW);
+GO
+
+-- ── 7.4  Rebuild ALL partitions with different compression per partition ───────
+ALTER INDEX CIX_FactTransaction_TxnDate
+ON dbo.FactTransaction
+REBUILD PARTITION = ALL
+WITH (
+    DATA_COMPRESSION = PAGE ON PARTITIONS (1, 2, 3),  -- old data → PAGE compress
+    DATA_COMPRESSION = ROW  ON PARTITIONS (4, 5, 6),  -- recent   → ROW compress
+    DATA_COMPRESSION = NONE ON PARTITIONS (7, 8)      -- current  → no compress
+);
+GO
+
+-- ── 7.5  Columnstore index on partitioned table ───────────────────────────────
+-- Enables real-time analytics on partitioned fact tables (HTAP pattern)
+CREATE NONCLUSTERED COLUMNSTORE INDEX NCSI_FactSalesOrder
+ON dbo.FactSalesOrder (OrderDate, CustomerID, SalesPersonID, TotalDue, Status)
+ON PS_SalesOrder_Year (OrderDate);
+GO
+
+-- ── 7.6  Verify index alignment ───────────────────────────────────────────────
+SELECT
+    i.name                      AS IndexName,
+    i.type_desc                 AS IndexType,
+    CASE
+        WHEN i.data_space_id = t.data_space_id THEN 'ALIGNED'
+        ELSE 'NON-ALIGNED'
+    END                         AS Alignment,
+    ds.name                     AS DataSpace
+FROM sys.indexes          i
+JOIN sys.tables           t  ON i.object_id = t.object_id
+JOIN sys.data_spaces      ds ON i.data_space_id = ds.data_space_id
+WHERE t.name = 'FactSalesOrder'
+ORDER BY i.index_id;
+GO
+
+
+/* ============================================================================
+   MODULE 08 — PARTITION SWITCHING
+   ============================================================================
+   Partition Switch = metadata-only operation (near-instant, fully logged).
+
+   Three patterns:
+   A. SWITCH IN  — load staging → production partition
+   B. SWITCH OUT — archive partition → staging / archive table
+   C. SLIDE      — switch out old, switch in new (rolling window)
+
+   Rules for switching:
+   1. Source and destination must have IDENTICAL structure (columns, types, nullability).
+   2. All indexes must be ALIGNED (or non-aligned must be pre-dropped).
+   3. Source and destination must be on the SAME filegroup as the target partition.
+   4. Check constraints must guarantee data fits in the target partition.
+   ============================================================================ */
+
+USE PartitionLab;
+GO
+
+-- ── 8.1  SWITCH OUT: Archive 2019 partition to a staging table ────────────────
+
+-- Step A: Create the archive table on the SAME filegroup as partition 1 (FG_2019)
+CREATE TABLE dbo.FactSalesOrder_Archive_2019
+(
+    SalesOrderID    INT          NOT NULL,
+    OrderDate       DATE         NOT NULL,
+    CustomerID      INT          NOT NULL,
+    SalesPersonID   INT          NULL,
+    TotalDue        MONEY        NOT NULL DEFAULT 0,
+    Status          TINYINT      NOT NULL DEFAULT 1,
+    CreatedAt       DATETIME2(0) NOT NULL DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT PK_Archive_2019
+        PRIMARY KEY CLUSTERED (SalesOrderID, OrderDate)
+)
+ON FG_2019;   -- ← must match the filegroup of partition 2 in PS_SalesOrder_Year
+GO
+
+-- Step B: Add matching non-clustered indexes
+CREATE NONCLUSTERED INDEX IX_Archive_2019_Customer
+ON dbo.FactSalesOrder_Archive_2019 (CustomerID, OrderDate)
+INCLUDE (TotalDue)
+ON FG_2019;
+GO
+
+-- Step C: Add a CHECK constraint to guarantee only 2019 data exists
+ALTER TABLE dbo.FactSalesOrder_Archive_2019
+ADD CONSTRAINT CHK_Archive_2019_OrderDate
+CHECK (OrderDate >= '2019-01-01' AND OrderDate < '2020-01-01');
+GO
+
+-- Step D: SWITCH OUT (partition 2 = 2019 data)
+ALTER TABLE dbo.FactSalesOrder
+SWITCH PARTITION 2 TO dbo.FactSalesOrder_Archive_2019;
+GO
+
+-- Verify: source partition is now empty
+SELECT COUNT(*) AS RowsInPartition2 FROM dbo.FactSalesOrder
+WHERE $PARTITION.PF_SalesOrder_Year(OrderDate) = 2;  -- should be 0
+
+SELECT COUNT(*) AS RowsInArchive FROM dbo.FactSalesOrder_Archive_2019;
+GO
+
+-- ── 8.2  SWITCH IN: Load a staging table into a partition ─────────────────────
+
+-- Create staging table on FG_STAGING
+CREATE TABLE dbo.FactSalesOrder_Stage_2025
+(
+    SalesOrderID    INT          NOT NULL,
+    OrderDate       DATE         NOT NULL,
+    CustomerID      INT          NOT NULL,
+    SalesPersonID   INT          NULL,
+    TotalDue        MONEY        NOT NULL DEFAULT 0,
+    Status          TINYINT      NOT NULL DEFAULT 1,
+    CreatedAt       DATETIME2(0) NOT NULL DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT PK_Stage_2025
+        PRIMARY KEY CLUSTERED (SalesOrderID, OrderDate)
+)
+ON FG_STAGING;
+GO
+
+-- Add CHECK constraint to guarantee data belongs to this partition
+ALTER TABLE dbo.FactSalesOrder_Stage_2025
+ADD CONSTRAINT CHK_Stage_2025_OrderDate
+CHECK (OrderDate >= '2025-01-01' AND OrderDate < '2026-01-01');
+GO
+
+-- Add matching aligned NC index (must match production table's indexes)
+CREATE NONCLUSTERED INDEX IX_Stage_2025_Customer
+ON dbo.FactSalesOrder_Stage_2025 (CustomerID, OrderDate)
+INCLUDE (TotalDue)
+ON FG_STAGING;
+GO
+
+-- Load data into staging (fast bulk insert, no production impact)
+INSERT INTO dbo.FactSalesOrder_Stage_2025
+    (SalesOrderID, OrderDate, CustomerID, SalesPersonID, TotalDue, Status)
+VALUES
+    (200001, '2025-01-15', 1001, 5, 1500.00, 1),
+    (200002, '2025-02-20', 1002, 8, 2300.50, 1),
+    (200003, '2025-03-10', 1003, 3,  890.75, 1);
+GO
+
+-- !! First: need to add 2025 boundary to partition function (Module 09 shows how)
+-- Assuming it exists as partition 9, switch in:
+-- ALTER TABLE dbo.FactSalesOrder_Stage_2025
+-- SWITCH TO dbo.FactSalesOrder PARTITION 9;
+
+-- ── 8.3  AdventureWorks SWITCH OUT: Archive 2011 orders ──────────────────────
+USE AdventureWorks2019;
+GO
+
+CREATE TABLE Sales.SalesOrderHeader_Archive_2011
+(
+    SalesOrderID            INT              NOT NULL,
+    RevisionNumber          TINYINT          NOT NULL,
+    OrderDate               DATETIME         NOT NULL,
+    DueDate                 DATETIME         NOT NULL,
+    ShipDate                DATETIME         NULL,
+    Status                  TINYINT          NOT NULL,
+    OnlineOrderFlag         dbo.Flag         NOT NULL,
+    SalesOrderNumber        NVARCHAR(25)     NOT NULL,
+    PurchaseOrderNumber     dbo.OrderNumber  NULL,
+    AccountNumber           dbo.AccountNumber NULL,
+    CustomerID              INT              NOT NULL,
+    SalesPersonID           INT              NULL,
+    TerritoryID             INT              NULL,
+    BillToAddressID         INT              NOT NULL,
+    ShipToAddressID         INT              NOT NULL,
+    ShipMethodID            INT              NOT NULL,
+    CreditCardID            INT              NULL,
+    CreditCardApprovalCode  VARCHAR(15)      NULL,
+    CurrencyRateID          INT              NULL,
+    SubTotal                MONEY            NOT NULL,
+    TaxAmt                  MONEY            NOT NULL,
+    Freight                 MONEY            NOT NULL,
+    TotalDue                MONEY            NOT NULL,
+    Comment                 NVARCHAR(128)    NULL,
+    rowguid                 UNIQUEIDENTIFIER NOT NULL,
+    ModifiedDate            DATETIME         NOT NULL,
+    CONSTRAINT PK_SalesOrderHeader_Archive_2011
+        PRIMARY KEY CLUSTERED (SalesOrderID, OrderDate)
+        ON FG_AW_2011,
+    CONSTRAINT CHK_Archive_2011_OrderDate
+        CHECK (OrderDate >= '2011-01-01' AND OrderDate < '2012-01-01')
+)
+ON FG_AW_2011;
+GO
+
+ALTER TABLE Sales.SalesOrderHeader
+SWITCH PARTITION 2 TO Sales.SalesOrderHeader_Archive_2011;
+GO
+
+
+/* ============================================================================
+   MODULE 09 — SPLITTING & MERGING PARTITIONS
+   ============================================================================ */
+
+USE PartitionLab;
+GO
+
+-- ── 9.1  SPLIT a partition — add a new boundary ──────────────────────────────
+-- Before splitting, MUST designate NEXT USED filegroup in the scheme
+ALTER PARTITION SCHEME PS_SalesOrder_Year
+NEXT USED FG_FUTURE;
+GO
+
+-- Split: add '2025-01-01' boundary to handle 2025 data
+ALTER PARTITION FUNCTION PF_SalesOrder_Year()
+SPLIT RANGE ('2025-01-01');
+GO
+-- This creates a new partition 9 for >= 2025-01-01 data
+-- Partition 8 (FG_FUTURE) now holds all data from 2024-01-01 onward
+-- IMPORTANT: Always split an EMPTY partition to avoid data movement!
+
+-- Verify
+SELECT $PARTITION.PF_SalesOrder_Year('2025-06-01') AS PartitionForJune2025;
+GO
+
+-- ── 9.2  MERGE partitions — remove a boundary ────────────────────────────────
+-- Merging combines two adjacent partitions into one.
+-- Data from both partitions moves into the surviving partition's filegroup.
+-- Always merge EMPTY partitions to avoid data movement!
+
+-- Example: merge the empty 2024 & 2025 boundaries into one
+-- (Only do this if both partitions have no rows!)
+ALTER PARTITION FUNCTION PF_SalesOrder_Year()
+MERGE RANGE ('2025-01-01');
+GO
+-- Partition 8 and 9 are now combined into a single partition 8
+
+-- ── 9.3  Safe split pattern (production) ──────────────────────────────────────
+-- Pattern: split first (while partition is empty), THEN load data
+-- This avoids the expensive data-movement during split.
+
+-- Step 1: Switch out any existing data from the partition being split
+--         (use SWITCH to staging table as shown in Module 08)
+-- Step 2: Designate NEXT USED
+ALTER PARTITION SCHEME PS_SalesOrder_Year
+NEXT USED FG_FUTURE;
+GO
+-- Step 3: Split (empty partition → no data movement)
+ALTER PARTITION FUNCTION PF_SalesOrder_Year()
+SPLIT RANGE ('2026-01-01');
+GO
+-- Step 4: Switch staged data back in via SWITCH IN
+
+/* ============================================================================
+   MODULE 10 — QUERYING PARTITIONED DATA — PARTITION ELIMINATION
+   ============================================================================
+   Partition Elimination = the optimizer skips irrelevant partitions.
+   This is the PRIMARY performance benefit of partitioning.
+   ============================================================================ */
+
+USE PartitionLab;
+GO
+-- ── 10.1  Query that USES partition elimination ───────────────────────────────
+-- Check actual execution plan: look for "Actual Partitions Accessed"
+SELECT SalesOrderID, TotalDue
+FROM dbo.FactSalesOrder
+WHERE OrderDate >= '2022-01-01' AND OrderDate < '2023-01-01';
+-- Plan shows: Seeks only partition 5 (2022 FG)
+GO
+
+-- ── 10.2  Query that PREVENTS elimination (function on column) ────────────────
+-- BAD: YEAR() function prevents elimination
+SELECT SalesOrderID, TotalDue
+FROM dbo.FactSalesOrder
+WHERE YEAR(OrderDate) = 2022;    -- ← all partitions scanned!
+GO
+
+-- GOOD: Use range predicates instead
+SELECT SalesOrderID, TotalDue
+FROM dbo.FactSalesOrder
+WHERE OrderDate >= '2022-01-01' AND OrderDate < '2023-01-01';  -- ← elimination!
+GO
+
+-- ── 10.3  Use $PARTITION to query a specific partition directly ───────────────
+SELECT SalesOrderID, OrderDate, TotalDue
+FROM dbo.FactSalesOrder
+WHERE $PARTITION.PF_SalesOrder_Year(OrderDate) = 4;  -- only 2021 partition
+GO
+
+-- ── 10.4  Aggregate per partition ─────────────────────────────────────────────
+SELECT
+    $PARTITION.PF_SalesOrder_Year(OrderDate) AS PartitionNum,
+    COUNT(*)                                  AS OrderCount,
+    SUM(TotalDue)                             AS TotalRevenue,
+    MIN(OrderDate)                            AS EarliestDate,
+    MAX(OrderDate)                            AS LatestDate
+FROM dbo.FactSalesOrder
+GROUP BY $PARTITION.PF_SalesOrder_Year(OrderDate)
+ORDER BY PartitionNum;
+GO
+
+-- ── 10.5  Verify partition elimination via DMV ────────────────────────────────
+-- Run the query, then check:
+SET STATISTICS IO ON;
+SELECT COUNT(*) FROM dbo.FactSalesOrder
+WHERE OrderDate >= '2023-01-01' AND OrderDate < '2024-01-01';
+SET STATISTICS IO OFF;
+-- Look at logical reads — should be much lower than full table scan.
+GO
+
+-- ── 10.6  Cross-partition aggregation with MIN/MAX optimization ───────────────
+-- SQL Server can use partition min/max metadata (no full scan)
+SELECT MIN(OrderDate), MAX(OrderDate)
+FROM dbo.FactSalesOrder;
+GO
+
+-- ── 10.7  AdventureWorks: Year-over-year sales by territory ───────────────────
+USE AdventureWorks2019;
+GO
+
+SELECT
+    TerritoryID,
+    YEAR(OrderDate)  AS OrderYear,
+    COUNT(*)         AS OrderCount,
+    SUM(TotalDue)    AS Revenue
+FROM Sales.SalesOrderHeader
+WHERE OrderDate >= '2012-01-01' AND OrderDate < '2014-01-01'  -- 2 partitions only
+GROUP BY TerritoryID, YEAR(OrderDate)
+ORDER BY TerritoryID, OrderYear;
+GO
+
+
+/* ============================================================================
+   MODULE 11 — MONITORING & DIAGNOSTICS
+   ============================================================================ */
+USE PartitionLab;
+GO
+-- ── 11.1  Row count per partition (all partitioned tables) ────────────────────
+SELECT
+    OBJECT_NAME(p.object_id)        AS TableName,
+    i.name                          AS IndexName,
+    i.type_desc                     AS IndexType,
+    p.partition_number              AS PartitionNum,
+    p.rows                          AS RowCount,
+    CAST(prv.value AS VARCHAR(30))  AS BoundaryValue,
+    fg.name                         AS Filegroup,
+    au.total_pages * 8 / 1024.0    AS TotalMB,
+    au.used_pages  * 8 / 1024.0    AS UsedMB
+FROM sys.partitions              p
+JOIN sys.indexes                 i   ON p.object_id   = i.object_id
+                                    AND p.index_id    = i.index_id
+JOIN sys.partition_schemes       ps  ON i.data_space_id = ps.data_space_id
+JOIN sys.partition_functions     pf  ON ps.function_id  = pf.function_id
+LEFT JOIN sys.partition_range_values prv
+    ON pf.function_id = prv.function_id
+    AND p.partition_number = prv.boundary_id + 1
+JOIN sys.destination_data_spaces dds ON ps.data_space_id = dds.partition_scheme_id
+    AND dds.destination_id = p.partition_number
+JOIN sys.filegroups              fg  ON dds.data_space_id = fg.data_space_id
+JOIN sys.allocation_units        au  ON p.partition_id   = au.container_id
+WHERE i.index_id <= 1
+  AND p.object_id = OBJECT_ID('dbo.FactSalesOrder')
+ORDER BY p.partition_number;
+GO
+
+-- ── 11.2  Partition fragmentation ─────────────────────────────────────────────
+SELECT
+    OBJECT_NAME(ips.object_id)    AS TableName,
+    i.name                         AS IndexName,
+    ips.partition_number,
+    ips.avg_fragmentation_in_percent,
+    ips.page_count,
+    ips.record_count,
+    ips.index_type_desc
+FROM sys.dm_db_index_physical_stats(
+        DB_ID(), OBJECT_ID('dbo.FactSalesOrder'), NULL, NULL, 'LIMITED') ips
+JOIN sys.indexes i ON ips.object_id = i.object_id AND ips.index_id = i.index_id
+ORDER BY ips.partition_number;
+GO
+
+-- ── 11.3  Statistics per partition ────────────────────────────────────────────
+SELECT
+    OBJECT_NAME(s.object_id)       AS TableName,
+    s.name                          AS StatName,
+    sp.partition_number,
+    sp.rows,
+    sp.rows_sampled,
+    sp.last_updated,
+    sp.modification_counter
+FROM sys.stats                      s
+CROSS APPLY sys.dm_db_stats_properties_internal(s.object_id, s.stats_id) sp
+WHERE s.object_id = OBJECT_ID('dbo.FactSalesOrder')
+ORDER BY s.name, sp.partition_number;
+GO
+
+-- ── 11.4  Active partition operations in progress ─────────────────────────────
+SELECT
+    r.session_id,
+    r.command,
+    r.status,
+    r.percent_complete,
+    SUBSTRING(st.text, (r.statement_start_offset/2)+1,
+              ((CASE r.statement_end_offset WHEN -1 THEN DATALENGTH(st.text)
+                ELSE r.statement_end_offset END - r.statement_start_offset)/2)+1) AS StatementText,
+    r.wait_type,
+    r.wait_time / 1000.0 AS WaitSec
+FROM sys.dm_exec_requests r
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) st
+WHERE r.command LIKE '%PARTITION%' OR st.text LIKE '%SWITCH%'
+   OR st.text LIKE '%SPLIT%'       OR st.text LIKE '%MERGE%';
+GO
+
+-- ── 11.5  Comprehensive partition health dashboard ────────────────────────────
+SELECT
+    t.name                               AS TableName,
+    pf.name                              AS PartitionFunction,
+    pf.fanout                            AS TotalPartitions,
+    SUM(p.rows)                          AS TotalRows,
+    SUM(au.total_pages) * 8 / 1024.0    AS TotalTableMB,
+    MIN(CAST(prv.value AS VARCHAR(30)))  AS OldestBoundary,
+    MAX(CAST(prv.value AS VARCHAR(30)))  AS NewestBoundary
+FROM sys.tables t
+JOIN sys.indexes             i   ON t.object_id     = i.object_id AND i.index_id <= 1
+JOIN sys.partition_schemes   ps  ON i.data_space_id = ps.data_space_id
+JOIN sys.partition_functions pf  ON ps.function_id  = pf.function_id
+JOIN sys.partitions          p   ON i.object_id     = p.object_id AND i.index_id = p.index_id
+JOIN sys.allocation_units    au  ON p.partition_id  = au.container_id
+LEFT JOIN sys.partition_range_values prv ON pf.function_id = prv.function_id
+GROUP BY t.name, pf.name, pf.fanout
+ORDER BY TotalTableMB DESC;
+GO
+
+
+/* ============================================================================
+   MODULE 12 — MAINTENANCE: STATISTICS, REBUILDS, COMPRESSION
+   ============================================================================ */
+USE PartitionLab;
+GO
+-- ── 12.1  Update statistics for a single partition ────────────────────────────
+UPDATE STATISTICS dbo.FactSalesOrder
+WITH RESAMPLE ON PARTITIONS (5);   -- only update stats for partition 5 (2023)
+GO
+
+-- ── 12.2  Rebuild a specific partition's index online ─────────────────────────
+ALTER INDEX PK_FactSalesOrder
+ON dbo.FactSalesOrder
+REBUILD PARTITION = 3
+WITH (
+    ONLINE = ON,
+    MAXDOP = 4,
+    DATA_COMPRESSION = PAGE
+);
+GO
+
+-- ── 12.3  Incremental statistics (SQL Server 2014+) ───────────────────────────
+-- Creates per-partition statistics (much faster update for large tables)
+CREATE STATISTICS ST_FactSalesOrder_OrderDate
+ON dbo.FactSalesOrder (OrderDate)
+WITH INCREMENTAL = ON;
+GO
+
+-- Update only the partition that changed
+UPDATE STATISTICS dbo.FactSalesOrder ST_FactSalesOrder_OrderDate
+WITH RESAMPLE ON PARTITIONS (6);
+GO
+
+-- ── 12.4  Data compression per partition ──────────────────────────────────────
+-- Hot partition (current year) → no compression (fastest writes)
+ALTER TABLE dbo.FactSalesOrder
+REBUILD PARTITION = 7  -- 2024 (current)
+WITH (DATA_COMPRESSION = NONE);
+
+-- Warm partitions → ROW compression (balanced)
+ALTER TABLE dbo.FactSalesOrder
+REBUILD PARTITION = 5  -- 2022
+WITH (DATA_COMPRESSION = ROW);
+
+ALTER TABLE dbo.FactSalesOrder
+REBUILD PARTITION = 6  -- 2023
+WITH (DATA_COMPRESSION = ROW);
+
+-- Cold / archive partitions → PAGE compression (maximum space saving)
+ALTER TABLE dbo.FactSalesOrder
+REBUILD PARTITION = 2  -- 2019
+WITH (DATA_COMPRESSION = PAGE);
+
+ALTER TABLE dbo.FactSalesOrder
+REBUILD PARTITION = 3  -- 2020
+WITH (DATA_COMPRESSION = PAGE);
+
+ALTER TABLE dbo.FactSalesOrder
+REBUILD PARTITION = 4  -- 2021
+WITH (DATA_COMPRESSION = PAGE);
+GO
+
+-- ── 12.5  Estimate compression savings before applying ────────────────────────
+EXEC sp_estimate_data_compression_savings
+    @schema_name     = 'dbo',
+    @object_name     = 'FactSalesOrder',
+    @index_id        = NULL,
+    @partition_number = 2,
+    @data_compression = 'PAGE';
+GO
+
+-- ── 12.6  Automated maintenance stored procedure ──────────────────────────────
+CREATE OR ALTER PROCEDURE dbo.usp_MaintainPartitions
+    @TableName      SYSNAME,
+    @SchemaName     SYSNAME = 'dbo',
+    @FragThreshold  FLOAT   = 30.0,   -- % fragmentation threshold
+    @MaxDOP         INT     = 4
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @SQL        NVARCHAR(MAX);
+    DECLARE @ObjId      INT = OBJECT_ID(QUOTENAME(@SchemaName) + '.' + QUOTENAME(@TableName));
+    DECLARE @PartNum    INT;
+    DECLARE @AvgFrag    FLOAT;
+    DECLARE @Pages      BIGINT;
+    DECLARE @IndexId    INT;
+    DECLARE @IndexName  SYSNAME;
+
+    IF @ObjId IS NULL
+    BEGIN
+        RAISERROR('Table %s.%s not found.', 16, 1, @SchemaName, @TableName);
+        RETURN;
+    END;
+
+    DECLARE cPartitions CURSOR LOCAL FAST_FORWARD FOR
+    SELECT
+        ips.partition_number,
+        ips.avg_fragmentation_in_percent,
+        ips.page_count,
+        ips.index_id,
+        i.name
+    FROM sys.dm_db_index_physical_stats(DB_ID(), @ObjId, NULL, NULL, 'LIMITED') ips
+    JOIN sys.indexes i ON ips.object_id = i.object_id AND ips.index_id = i.index_id
+    WHERE ips.avg_fragmentation_in_percent > 10
+      AND ips.page_count > 1000
+    ORDER BY ips.avg_fragmentation_in_percent DESC;
+
+    OPEN cPartitions;
+    FETCH NEXT FROM cPartitions INTO @PartNum, @AvgFrag, @Pages, @IndexId, @IndexName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        IF @AvgFrag >= @FragThreshold
+        BEGIN
+            -- High fragmentation → REBUILD
+            SET @SQL = N'ALTER INDEX ' + QUOTENAME(@IndexName) + N' ON '
+                     + QUOTENAME(@SchemaName) + N'.' + QUOTENAME(@TableName)
+                     + N' REBUILD PARTITION = ' + CAST(@PartNum AS NVARCHAR(10))
+                     + N' WITH (ONLINE = ON, MAXDOP = ' + CAST(@MaxDOP AS NVARCHAR(5))
+                     + N', DATA_COMPRESSION = ROW);';
+        END
+        ELSE
+        BEGIN
+            -- Low-medium fragmentation → REORGANIZE (online, always)
+            SET @SQL = N'ALTER INDEX ' + QUOTENAME(@IndexName) + N' ON '
+                     + QUOTENAME(@SchemaName) + N'.' + QUOTENAME(@TableName)
+                     + N' REORGANIZE PARTITION = ' + CAST(@PartNum AS NVARCHAR(10)) + N';';
+        END;
+
+        PRINT 'Executing: ' + @SQL;
+        EXEC sp_executesql @SQL;
+
+        FETCH NEXT FROM cPartitions INTO @PartNum, @AvgFrag, @Pages, @IndexId, @IndexName;
+    END;
+
+    CLOSE cPartitions;
+    DEALLOCATE cPartitions;
+
+    -- Update incremental stats for all partitions that were maintained
+    SET @SQL = N'UPDATE STATISTICS ' + QUOTENAME(@SchemaName) + N'.' + QUOTENAME(@TableName)
+             + N' WITH INCREMENTAL = ON, FULLSCAN;';
+    EXEC sp_executesql @SQL;
+
+    PRINT 'Partition maintenance complete for ' + @SchemaName + '.' + @TableName;
+END;
+GO
+
+-- Run it:
+EXEC dbo.usp_MaintainPartitions @TableName = 'FactSalesOrder', @SchemaName = 'dbo';
+GO
+
+
+/* ============================================================================
+   MODULE 13 — ADVANCED: FULL SLIDING WINDOW AUTOMATION
+   ============================================================================
+   Real-World Scenario:
+   A data warehouse loads monthly sales data. Each month:
+     1. Add a new future partition (SPLIT)
+     2. Load new data into staging
+     3. SWITCH IN staging → production
+     4. SWITCH OUT oldest partition → archive
+     5. MERGE the old empty partition
+   ============================================================================ */
+
+USE PartitionLab;
+GO
+
+-- ── 13.1  Setup: 12-month rolling partition table ────────────────────────────
+-- We use a monthly partition function
+CREATE PARTITION FUNCTION PF_SlidingWindow (DATE)
+AS RANGE RIGHT
+FOR VALUES (
+    '2024-01-01','2024-02-01','2024-03-01','2024-04-01',
+    '2024-05-01','2024-06-01','2024-07-01','2024-08-01',
+    '2024-09-01','2024-10-01','2024-11-01','2024-12-01',
+    '2025-01-01'
+);
+GO
+
+CREATE PARTITION SCHEME PS_SlidingWindow
+AS PARTITION PF_SlidingWindow
+ALL TO ([PRIMARY]);
+GO
+
+CREATE TABLE dbo.FactDailySales
+(
+    SaleID        BIGINT  IDENTITY(1,1) NOT NULL,
+    SaleDate      DATE    NOT NULL,
+    StoreID       INT     NOT NULL,
+    ProductID     INT     NOT NULL,
+    Qty           INT     NOT NULL,
+    Revenue       MONEY   NOT NULL,
+    CONSTRAINT PK_FactDailySales PRIMARY KEY CLUSTERED (SaleID, SaleDate)
+    ON PS_SlidingWindow (SaleDate)
+)
+ON PS_SlidingWindow (SaleDate);
+GO
+
+-- Archive table (same structure, [PRIMARY] filegroup)
+CREATE TABLE dbo.FactDailySales_Archive
+(
+    SaleID        BIGINT  NOT NULL,
+    SaleDate      DATE    NOT NULL,
+    StoreID       INT     NOT NULL,
+    ProductID     INT     NOT NULL,
+    Qty           INT     NOT NULL,
+    Revenue       MONEY   NOT NULL,
+    CONSTRAINT PK_FactDailySales_Archive PRIMARY KEY CLUSTERED (SaleID, SaleDate)
+)
+ON [PRIMARY];
+GO
+
+-- ── 13.2  The Sliding Window Stored Procedure ─────────────────────────────────
+CREATE OR ALTER PROCEDURE dbo.usp_SlidingWindowAdvance
+    @NewMonth DATE  -- e.g. '2025-02-01'
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @OldMonth   DATE = DATEADD(MONTH, -13, @NewMonth); -- oldest boundary
+    DECLARE @NextMonth  DATE = DATEADD(MONTH,   1, @NewMonth); -- boundary after new
+    DECLARE @StagingTable   SYSNAME;
+    DECLARE @CheckSql       NVARCHAR(MAX);
+    DECLARE @SwitchSql      NVARCHAR(MAX);
+    DECLARE @PartNew        INT;
+    DECLARE @PartOld        INT;
+
+    PRINT '====== Sliding Window Advance ======';
+    PRINT 'New Month  : ' + CONVERT(VARCHAR, @NewMonth, 23);
+    PRINT 'Old Boundary to remove: ' + CONVERT(VARCHAR, @OldMonth, 23);
+
+    -- ── Step 1: Create staging table for new month ────────────────────────────
+    SET @StagingTable = 'dbo.FactDailySales_Stage_' + FORMAT(@NewMonth, 'yyyyMM');
+
+    SET @CheckSql = N'
+    IF OBJECT_ID(''' + @StagingTable + ''') IS NULL
+    BEGIN
+        CREATE TABLE ' + @StagingTable + '
+        (
+            SaleID    BIGINT NOT NULL,
+            SaleDate  DATE   NOT NULL,
+            StoreID   INT    NOT NULL,
+            ProductID INT    NOT NULL,
+            Qty       INT    NOT NULL,
+            Revenue   MONEY  NOT NULL,
+            CONSTRAINT PK_Stage_' + FORMAT(@NewMonth,'yyyyMM') + '
+                PRIMARY KEY CLUSTERED (SaleID, SaleDate)
+        ) ON [PRIMARY];
+
+        ALTER TABLE ' + @StagingTable + '
+        ADD CONSTRAINT CHK_Stage_' + FORMAT(@NewMonth,'yyyyMM') + '
+        CHECK (SaleDate >= ''' + CONVERT(VARCHAR,@NewMonth,23) + ''' AND SaleDate < ''' + CONVERT(VARCHAR,@NextMonth,23) + ''');
+
+        PRINT ''Staging table created: ' + @StagingTable + ''';
+    END';
+    EXEC sp_executesql @CheckSql;
+
+    PRINT 'Step 1 complete: Staging table ready';
+
+    -- ── Step 2: SPLIT to create new future partition ─────────────────────────
+    -- (Skip if boundary already exists)
+    IF NOT EXISTS (
+        SELECT 1 FROM sys.partition_range_values prv
+        JOIN sys.partition_functions pf ON prv.function_id = pf.function_id
+        WHERE pf.name = 'PF_SlidingWindow'
+          AND CAST(prv.value AS DATE) = @NextMonth
+    )
+    BEGIN
+        ALTER PARTITION SCHEME PS_SlidingWindow NEXT USED [PRIMARY];
+        ALTER PARTITION FUNCTION PF_SlidingWindow() SPLIT RANGE (@NextMonth);
+        PRINT 'Step 2 complete: Split partition for ' + CONVERT(VARCHAR,@NextMonth,23);
+    END
+    ELSE
+        PRINT 'Step 2 skipped: Boundary ' + CONVERT(VARCHAR,@NextMonth,23) + ' already exists';
+
+    -- ── Step 3: Load data into staging (caller populates before switching) ────
+    PRINT 'Step 3: Populate ' + @StagingTable + ' with new month data before Step 4.';
+    -- In real scenario, ETL process fills staging here.
+    -- For lab: insert sample data:
+    SET @CheckSql = N'
+    IF NOT EXISTS (SELECT 1 FROM ' + @StagingTable + ')
+    BEGIN
+        INSERT INTO ' + @StagingTable + ' (SaleID, SaleDate, StoreID, ProductID, Qty, Revenue)
+        SELECT TOP 1000
+            ABS(CHECKSUM(NEWID())) % 9000000 + 1000000,
+            DATEADD(DAY, ABS(CHECKSUM(NEWID())) % 28, ''' + CONVERT(VARCHAR,@NewMonth,23) + '''),
+            ABS(CHECKSUM(NEWID())) % 100 + 1,
+            ABS(CHECKSUM(NEWID())) % 500 + 1,
+            ABS(CHECKSUM(NEWID())) % 50  + 1,
+            ABS(CHECKSUM(NEWID())) % 5000 / 100.0
+        FROM sys.all_columns;
+        PRINT ''Sample data loaded into staging'';
+    END';
+    EXEC sp_executesql @CheckSql;
+
+    -- ── Step 4: SWITCH IN staging → production ───────────────────────────────
+    SET @PartNew = $PARTITION.PF_SlidingWindow(@NewMonth);
+
+    SET @SwitchSql = N'ALTER TABLE ' + @StagingTable
+                   + N' SWITCH TO dbo.FactDailySales PARTITION '
+                   + CAST(@PartNew AS NVARCHAR(5)) + N';';
+    EXEC sp_executesql @SwitchSql;
+    PRINT 'Step 4 complete: Switched IN partition ' + CAST(@PartNew AS VARCHAR) + ' (' + CONVERT(VARCHAR,@NewMonth,23) + ')';
+
+    -- ── Step 5: SWITCH OUT oldest partition → archive ────────────────────────
+    SET @PartOld = $PARTITION.PF_SlidingWindow(@OldMonth);
+
+    -- Ensure archive has matching CHECK constraint
+    IF NOT EXISTS (
+        SELECT 1 FROM sys.check_constraints
+        WHERE parent_object_id = OBJECT_ID('dbo.FactDailySales_Archive')
+          AND definition LIKE '%' + CONVERT(VARCHAR,@OldMonth,23) + '%'
+    )
+    BEGIN
+        SET @CheckSql = N'
+        ALTER TABLE dbo.FactDailySales_Archive
+        ADD CONSTRAINT CHK_Archive_' + FORMAT(@OldMonth,'yyyyMM') + '
+        CHECK (1=1);';  -- broad constraint; archive accepts any data
+        -- In practice, use separate archive tables per period
+    END;
+
+    SET @SwitchSql = N'ALTER TABLE dbo.FactDailySales SWITCH PARTITION '
+                   + CAST(@PartOld AS NVARCHAR(5))
+                   + N' TO dbo.FactDailySales_Archive;';
+    EXEC sp_executesql @SwitchSql;
+    PRINT 'Step 5 complete: Switched OUT partition ' + CAST(@PartOld AS VARCHAR) + ' (' + CONVERT(VARCHAR,@OldMonth,23) + ')';
+
+    -- ── Step 6: MERGE oldest empty boundary ──────────────────────────────────
+    ALTER PARTITION FUNCTION PF_SlidingWindow() MERGE RANGE (@OldMonth);
+    PRINT 'Step 6 complete: Merged boundary ' + CONVERT(VARCHAR,@OldMonth,23);
+
+    -- ── Step 7: Drop staging table (optional, or keep for audit) ─────────────
+    SET @CheckSql = N'DROP TABLE IF EXISTS ' + @StagingTable + ';';
+    EXEC sp_executesql @CheckSql;
+    PRINT 'Step 7 complete: Staging table cleaned up';
+
+    PRINT '====== Sliding Window Complete ======';
+END;
+GO
+
+-- Test: advance to February 2025
+EXEC dbo.usp_SlidingWindowAdvance @NewMonth = '2025-02-01';
+GO
+
+-- Run again next month:
+-- EXEC dbo.usp_SlidingWindowAdvance @NewMonth = '2025-03-01';
+
+
+/* ============================================================================
+   MODULE 14 — PARTITIONED VIEWS vs TABLE PARTITIONING
+   ============================================================================
+   Partitioned Views: UNION ALL of multiple physical tables with CHECK constraints.
+   Older pattern (pre-SQL Server 2005). Still useful for cross-database scenarios.
+   ============================================================================ */
+
+USE PartitionLab;
+GO
+
+-- ── 14.1  Create member tables ────────────────────────────────────────────────
+CREATE TABLE dbo.Orders_2022
+(
+    OrderID   INT  NOT NULL,
+    OrderYear INT  NOT NULL CHECK (OrderYear = 2022),
+    Amount    MONEY NOT NULL,
+    CONSTRAINT PK_Orders_2022 PRIMARY KEY (OrderID, OrderYear)
+);
+
+CREATE TABLE dbo.Orders_2023
+(
+    OrderID   INT  NOT NULL,
+    OrderYear INT  NOT NULL CHECK (OrderYear = 2023),
+    Amount    MONEY NOT NULL,
+    CONSTRAINT PK_Orders_2023 PRIMARY KEY (OrderID, OrderYear)
+);
+
+CREATE TABLE dbo.Orders_2024
+(
+    OrderID   INT  NOT NULL,
+    OrderYear INT  NOT NULL CHECK (OrderYear = 2024),
+    Amount    MONEY NOT NULL,
+    CONSTRAINT PK_Orders_2024 PRIMARY KEY (OrderID, OrderYear)
+);
+GO
+
+-- ── 14.2  Create the partitioned view ─────────────────────────────────────────
+CREATE VIEW dbo.vw_Orders_Partitioned
+AS
+    SELECT * FROM dbo.Orders_2022
+    UNION ALL
+    SELECT * FROM dbo.Orders_2023
+    UNION ALL
+    SELECT * FROM dbo.Orders_2024;
+GO
+
+-- ── 14.3  INSERT into the view (SQL Server routes to correct table) ────────────
+INSERT INTO dbo.vw_Orders_Partitioned VALUES (1001, 2023, 500.00);
+INSERT INTO dbo.vw_Orders_Partitioned VALUES (1002, 2024, 750.00);
+GO
+
+-- ── 14.4  Query with partition elimination ────────────────────────────────────
+SELECT * FROM dbo.vw_Orders_Partitioned WHERE OrderYear = 2023;
+-- Only Orders_2023 is accessed
+GO
+
+-- When to choose Partitioned View vs Table Partitioning:
+--   Use TABLE PARTITIONING for: same server, large tables, switching, simplicity
+--   Use PARTITIONED VIEW for  : cross-database, cross-server, legacy compat
+
+
+/* ============================================================================
+   MODULE 15 — ADVANCED: COLUMNSTORE + PARTITIONED TABLES (HTAP)
+   ============================================================================
+   Real-World Scenario: Sales fact table with real-time OLTP writes on current
+   month partition, Columnstore for analytics on older partitions.
+   ============================================================================ */
+
+USE PartitionLab;
+GO
+-- ── 15.1  Partitioned Columnstore table (analytical workload) ─────────────────
+CREATE TABLE dbo.FactSalesColumnStore
+(
+    SaleID      BIGINT  NOT NULL,
+    SaleDate    DATE    NOT NULL,
+    StoreID     INT     NOT NULL,
+    ProductID   INT     NOT NULL,
+    Qty         INT     NOT NULL,
+    Revenue     MONEY   NOT NULL,
+    UnitCost    MONEY   NOT NULL,
+    Margin      AS (Revenue - (Qty * UnitCost)) PERSISTED
+)
+ON PS_SlidingWindow (SaleDate);
+GO
+
+-- ── 15.2  Clustered Columnstore index on the partitioned table ────────────────
+CREATE CLUSTERED COLUMNSTORE INDEX CCI_FactSalesColumnStore
+ON dbo.FactSalesColumnStore
+ON PS_SlidingWindow (SaleDate);
+GO
+
+-- ── 15.3  Non-clustered rowstore index for OLTP point lookups ─────────────────
+CREATE NONCLUSTERED INDEX IX_FactSalesCS_SaleID
+ON dbo.FactSalesColumnStore (SaleID, SaleDate)
+ON PS_SlidingWindow (SaleDate);
+GO
+
+-- ── 15.4  Load sample data ────────────────────────────────────────────────────
+INSERT INTO dbo.FactSalesColumnStore (SaleID, SaleDate, StoreID, ProductID, Qty, Revenue, UnitCost)
+SELECT TOP 500000
+    ROW_NUMBER() OVER (ORDER BY (SELECT NULL)),
+    DATEADD(DAY, ABS(CHECKSUM(NEWID())) % 365, '2024-01-01'),
+    ABS(CHECKSUM(NEWID())) % 100 + 1,
+    ABS(CHECKSUM(NEWID())) % 500 + 1,
+    ABS(CHECKSUM(NEWID())) % 20  + 1,
+    ABS(CHECKSUM(NEWID())) % 1000 / 10.0,
+    ABS(CHECKSUM(NEWID())) % 500  / 10.0
+FROM sys.all_columns a CROSS JOIN sys.all_columns b;
+GO
+
+-- ── 15.5  Analytical query using Columnstore (batch mode) ────────────────────
+SELECT
+    StoreID,
+    ProductID,
+    SUM(Qty)     AS TotalQty,
+    SUM(Revenue) AS TotalRevenue,
+    AVG(Margin)  AS AvgMargin
+FROM dbo.FactSalesColumnStore
+WHERE SaleDate BETWEEN '2024-01-01' AND '2024-06-30'
+GROUP BY StoreID, ProductID
+ORDER BY TotalRevenue DESC;
+GO
+
+-- ── 15.6  Delta store monitoring (rowgroups per partition) ────────────────────
+SELECT
+    p.partition_number,
+    rg.state_desc          AS RowGroupState,
+    rg.total_rows,
+    rg.size_in_bytes / 1024 / 1024 AS SizeMB,
+    rg.deleted_rows,
+    rg.trim_reason_desc
+FROM sys.column_store_row_groups rg
+JOIN sys.partitions              p
+    ON rg.object_id     = p.object_id
+    AND rg.partition_id = p.partition_id
+WHERE rg.object_id = OBJECT_ID('dbo.FactSalesColumnStore')
+ORDER BY p.partition_number, rg.state_desc;
+GO
+
+-- Force delta store compression (close open delta stores)
+ALTER INDEX CCI_FactSalesColumnStore
+ON dbo.FactSalesColumnStore
+REORGANIZE WITH (COMPRESS_ALL_ROW_GROUPS = ON);
+GO
+
+
+/* ============================================================================
+   MODULE 16 — ADVANCED: ROW-LEVEL SECURITY ON PARTITIONED TABLES
+   ============================================================================
+   Scenario: Sales reps can only see their own region's orders (by TerritoryID)
+   combined with partitioned data (by year).
+   ============================================================================ */
+
+USE PartitionLab;
+GO
+
+-- ── 16.1  Add TerritoryID to FactSalesOrder ───────────────────────────────────
+ALTER TABLE dbo.FactSalesOrder ADD TerritoryID INT NULL;
+GO
+
+-- ── 16.2  Create RLS predicate function ───────────────────────────────────────
+CREATE OR ALTER FUNCTION dbo.fn_RLS_SalesOrderFilter
+(
+    @TerritoryID INT
+)
+RETURNS TABLE
+WITH SCHEMABINDING
+AS
+RETURN
+(
+    SELECT 1 AS result
+    WHERE
+        -- Sysadmin and db_owner see everything
+        IS_MEMBER('db_owner') = 1
+        OR
+        -- Sales reps see their own territory (stored in USER_NAME() as TerritoryX)
+        @TerritoryID = CAST(REPLACE(USER_NAME(), 'Territory', '') AS INT)
+        OR
+        -- Global sales manager role
+        IS_MEMBER('GlobalSalesManager') = 1
+);
+GO
+
+-- ── 16.3  Create Security Policy ──────────────────────────────────────────────
+CREATE SECURITY POLICY dbo.SP_SalesOrder_Territory
+ADD FILTER PREDICATE dbo.fn_RLS_SalesOrderFilter(TerritoryID)
+    ON dbo.FactSalesOrder,
+ADD BLOCK  PREDICATE dbo.fn_RLS_SalesOrderFilter(TerritoryID)
+    ON dbo.FactSalesOrder AFTER INSERT
+WITH (STATE = ON);
+GO
+
+-- ── 16.4  Test: partition elimination + RLS together ──────────────────────────
+-- A user in Territory 3 querying 2023 data → only 2023 partition scanned
+-- AND only their territory's rows returned
+SELECT COUNT(*) FROM dbo.FactSalesOrder
+WHERE OrderDate >= '2023-01-01' AND OrderDate < '2024-01-01';
+GO
+
+-- Disable for lab cleanup:
+ALTER SECURITY POLICY dbo.SP_SalesOrder_Territory WITH (STATE = OFF);
+GO
+
+/* ============================================================================
+   MODULE 17 — ADVANCED: MULTI-COLUMN PARTITION WORKAROUND
+   ============================================================================
+   SQL Server supports only ONE partition column.
+   Workaround: computed column combining two values.
+   Scenario: Partition by YEAR + REGION (as a composite integer key)
+   ============================================================================ */
+
+USE PartitionLab;
+GO
+-- ── 17.1  Create composite partition key ──────────────────────────────────────
+-- Encode: YearRegionKey = (YEAR * 100) + RegionID
+-- E.g., 2023, Region 5 → 202305
+CREATE PARTITION FUNCTION PF_YearRegion (INT)
+AS RANGE RIGHT
+FOR VALUES (
+    202200, 202300, 202400, 202500,   -- year boundaries
+    202301, 202401                    -- within-year region boundaries (example)
+);
+GO
+
+CREATE PARTITION SCHEME PS_YearRegion
+AS PARTITION PF_YearRegion
+ALL TO ([PRIMARY]);
+GO
+
+CREATE TABLE dbo.FactSalesRegional
+(
+    SaleID          INT          IDENTITY(1,1) NOT NULL,
+    SaleDate        DATE         NOT NULL,
+    RegionID        SMALLINT     NOT NULL,
+    YearRegionKey   AS (YEAR(SaleDate) * 100 + RegionID) PERSISTED,  -- computed col
+    StoreID         INT          NOT NULL,
+    Revenue         MONEY        NOT NULL,
+    CONSTRAINT PK_FactSalesRegional PRIMARY KEY CLUSTERED (SaleID, YearRegionKey)
+    ON PS_YearRegion (YearRegionKey)
+)
+ON PS_YearRegion (YearRegionKey);
+GO
+
+-- Insert test data
+INSERT INTO dbo.FactSalesRegional (SaleDate, RegionID, StoreID, Revenue)
+VALUES
+    ('2023-05-01', 1, 10, 1000),
+    ('2023-05-01', 3, 20, 2000),
+    ('2024-01-15', 1, 10, 1500),
+    ('2024-03-10', 4, 30, 3000);
+GO
+
+-- Query: partition elimination on computed key
+SELECT * FROM dbo.FactSalesRegional
+WHERE YearRegionKey >= 202400 AND YearRegionKey < 202500;
+GO
+
+/* ============================================================================
+   MODULE 18 — ADVANCED: AdventureWorks End-to-End Scenario
+   ============================================================================
+   Scenario: Build a partitioned analytical layer on top of AdventureWorks.
+   Combine multiple tables into a partitioned fact with incremental loading.
+   ============================================================================ */
+
+USE AdventureWorks2019;
+GO
+
+-- ── 18.1  Create partitioned analytical fact table ────────────────────────────
+CREATE PARTITION FUNCTION PF_AW_Analytics (DATE)
+AS RANGE RIGHT
+FOR VALUES ('2011-01-01','2012-01-01','2013-01-01','2014-01-01');
+GO
+
+CREATE PARTITION SCHEME PS_AW_Analytics
+AS PARTITION PF_AW_Analytics
+ALL TO ([PRIMARY]);
+GO
+
+CREATE TABLE Sales.FactSalesAnalytics
+(
+    SalesOrderID    INT         NOT NULL,
+    OrderDate       DATE        NOT NULL,
+    CustomerID      INT         NOT NULL,
+    SalesPersonID   INT         NULL,
+    TerritoryID     INT         NULL,
+    ProductID       INT         NOT NULL,
+    OrderQty        SMALLINT    NOT NULL,
+    UnitPrice       MONEY       NOT NULL,
+    LineTotal       MONEY       NOT NULL,
+    SubTotal        MONEY       NOT NULL,
+    TotalDue        MONEY       NOT NULL,
+    SalesPerson     NVARCHAR(100) NULL,
+    CustomerName    NVARCHAR(200) NULL,
+    ProductName     NVARCHAR(50)  NULL,
+    CategoryName    NVARCHAR(50)  NULL,
+    TerritoryName   NVARCHAR(50)  NULL,
+    CONSTRAINT PK_FactSalesAnalytics
+        PRIMARY KEY CLUSTERED (SalesOrderID, ProductID, OrderDate)
+    ON PS_AW_Analytics (OrderDate)
+)
+ON PS_AW_Analytics (OrderDate);
+GO
+
+-- ── 18.2  Populate from normalized source tables ──────────────────────────────
+INSERT INTO Sales.FactSalesAnalytics
+SELECT
+    soh.SalesOrderID,
+    CAST(soh.OrderDate AS DATE),
+    soh.CustomerID,
+    soh.SalesPersonID,
+    soh.TerritoryID,
+    sod.ProductID,
+    sod.OrderQty,
+    sod.UnitPrice,
+    sod.LineTotal,
+    soh.SubTotal,
+    soh.TotalDue,
+    ISNULL(p.FirstName + ' ' + p.LastName, 'Online'),
+    ISNULL(pp.FirstName + ' ' + pp.LastName, c.AccountNumber),
+    pr.Name,
+    pc.Name,
+    st.Name
+FROM Sales.SalesOrderHeader    soh
+JOIN Sales.SalesOrderDetail    sod ON soh.SalesOrderID   = sod.SalesOrderID
+JOIN Production.Product        pr  ON sod.ProductID       = pr.ProductID
+JOIN Production.ProductSubcategory psc ON pr.ProductSubcategoryID = psc.ProductSubcategoryID
+JOIN Production.ProductCategory    pc  ON psc.ProductCategoryID   = pc.ProductCategoryID
+LEFT JOIN Sales.SalesPerson    sp  ON soh.SalesPersonID   = sp.BusinessEntityID
+LEFT JOIN Person.Person        p   ON sp.BusinessEntityID = p.BusinessEntityID
+LEFT JOIN Sales.Customer       c   ON soh.CustomerID      = c.CustomerID
+LEFT JOIN Person.Person        pp  ON c.PersonID          = pp.BusinessEntityID
+LEFT JOIN Sales.SalesTerritory st  ON soh.TerritoryID     = st.TerritoryID;
+GO
+
+-- ── 18.3  Add Columnstore for analytical workload ─────────────────────────────
+CREATE NONCLUSTERED COLUMNSTORE INDEX NCSI_FactSalesAnalytics
+ON Sales.FactSalesAnalytics
+(OrderDate, TerritoryID, ProductID, CategoryName, OrderQty, LineTotal, TotalDue)
+ON PS_AW_Analytics (OrderDate);
+GO
+
+-- ── 18.4  Business Intelligence queries with partition elimination ─────────────
+
+-- Query 1: Revenue by Category per Year (hits 4 partitions, batch mode)
+SELECT
+    CategoryName,
+    YEAR(OrderDate)  AS OrderYear,
+    COUNT(DISTINCT SalesOrderID) AS OrderCount,
+    SUM(OrderQty)    AS TotalQty,
+    SUM(LineTotal)   AS TotalRevenue
+FROM Sales.FactSalesAnalytics
+GROUP BY CategoryName, YEAR(OrderDate)
+ORDER BY OrderYear, TotalRevenue DESC;
+
+-- Query 2: Top 10 Salespeople in 2013 (1 partition)
+SELECT TOP 10
+    SalesPerson,
+    COUNT(DISTINCT SalesOrderID) AS Orders,
+    SUM(TotalDue)                AS TotalSales
+FROM Sales.FactSalesAnalytics
+WHERE OrderDate >= '2013-01-01' AND OrderDate < '2014-01-01'
+GROUP BY SalesPerson
+ORDER BY TotalSales DESC;
+
+-- Query 3: Territory growth YoY
+SELECT
+    TerritoryName,
+    SUM(CASE WHEN OrderDate >= '2012-01-01' AND OrderDate < '2013-01-01' THEN TotalDue END) AS Revenue_2012,
+    SUM(CASE WHEN OrderDate >= '2013-01-01' AND OrderDate < '2014-01-01' THEN TotalDue END) AS Revenue_2013,
+    SUM(CASE WHEN OrderDate >= '2013-01-01' AND OrderDate < '2014-01-01' THEN TotalDue END)
+        - SUM(CASE WHEN OrderDate >= '2012-01-01' AND OrderDate < '2013-01-01' THEN TotalDue END)
+        AS YoYGrowth
+FROM Sales.FactSalesAnalytics
+WHERE OrderDate >= '2012-01-01' AND OrderDate < '2014-01-01'
+GROUP BY TerritoryName
+ORDER BY YoYGrowth DESC;
+GO
+
+
+/* ============================================================================
+   MODULE 19 — TROUBLESHOOTING & COMMON PITFALLS
+   ============================================================================ */
+
+USE PartitionLab;
+GO
+
+-- ── 19.1  Pitfall: Partition key not in clustered index ───────────────────────
+-- ERROR: "The partition scheme 'PS_SalesOrder_Year' requires 1 partition column"
+-- FIX: Include partition column in the clustered index / PK.
+-- BAD:
+--   CREATE TABLE T (ID INT PRIMARY KEY CLUSTERED, OrderDate DATE)
+--   ON PS_SalesOrder_Year(OrderDate); -- ERROR!
+-- GOOD:
+--   CREATE TABLE T (ID INT, OrderDate DATE,
+--     CONSTRAINT PK_T PRIMARY KEY CLUSTERED (ID, OrderDate)  -- include partition col
+--   ) ON PS_SalesOrder_Year(OrderDate);
+
+-- ── 19.2  Pitfall: SWITCH fails due to non-aligned index ──────────────────────
+-- ERROR: "ALTER TABLE SWITCH statement failed."
+-- FIX: Drop non-aligned indexes before switching, re-create after.
+
+-- Check for non-aligned indexes:
+SELECT
+    i.name,
+    CASE WHEN i.data_space_id = t.data_space_id THEN 'ALIGNED' ELSE 'NON-ALIGNED' END AS Alignment
+FROM sys.indexes i
+JOIN sys.tables  t ON i.object_id = t.object_id
+WHERE t.name = 'FactSalesOrder';
+
+-- ── 19.3  Pitfall: SPLIT causes data movement ─────────────────────────────────
+-- A SPLIT where the boundary falls INSIDE a non-empty partition causes data
+-- to be physically moved. This can be slow and generates heavy log.
+-- FIX: Always split EMPTY partitions! Use SWITCH OUT first.
+
+-- Check if partition is empty before splitting:
+SELECT
+    partition_number,
+    rows
+FROM sys.partitions
+WHERE object_id = OBJECT_ID('dbo.FactSalesOrder')
+  AND index_id <= 1
+  AND rows > 0
+ORDER BY partition_number;
+GO
+
+-- ── 19.4  Pitfall: Forgot NEXT USED before SPLIT ──────────────────────────────
+-- ERROR: "There is no next used filegroup defined for partition scheme..."
+-- FIX: Always run ALTER PARTITION SCHEME ... NEXT USED before SPLIT.
+
+-- ── 19.5  Pitfall: CHECK constraint mismatch in SWITCH ────────────────────────
+-- ERROR: "ALTER TABLE SWITCH statement failed because ... not all rows satisfy..."
+-- FIX: Add CHECK constraint to destination table matching the partition range.
+
+-- Diagnose: which rows would violate the constraint?
+SELECT TOP 10 *
+FROM dbo.FactSalesOrder
+WHERE $PARTITION.PF_SalesOrder_Year(OrderDate) = 3
+  AND (OrderDate < '2020-01-01' OR OrderDate >= '2021-01-01');
+-- Should return 0 rows if data is clean
+
+-- ── 19.6  Pitfall: NULL values in partition column ────────────────────────────
+-- NULLs always go to partition 1 (the leftmost partition)
+-- FIX: Add NOT NULL constraint to partition column
+SELECT COUNT(*) AS NullPartitionKeyRows
+FROM dbo.FactSalesOrder
+WHERE OrderDate IS NULL;
+GO
+
+-- ── 19.7  Pitfall: Implicit conversion prevents partition elimination ──────────
+-- If the partition column is DATE but you filter with VARCHAR, conversion happens.
+-- BAD:
+SELECT COUNT(*) FROM dbo.FactSalesOrder WHERE OrderDate = '20230101';  -- string
+-- GOOD (explicit, same type):
+SELECT COUNT(*) FROM dbo.FactSalesOrder WHERE OrderDate = CAST('2023-01-01' AS DATE);
+GO
+
+-- ── 19.8  Check for ghost records in columnstore partitions ───────────────────
+SELECT
+    p.partition_number,
+    rg.state_desc,
+    rg.deleted_rows,
+    rg.total_rows,
+    CAST(rg.deleted_rows * 100.0 / NULLIF(rg.total_rows,0) AS DECIMAL(5,1)) AS PctDeleted
+FROM sys.column_store_row_groups rg
+JOIN sys.partitions p
+    ON rg.object_id = p.object_id AND rg.partition_id = p.partition_id
+WHERE rg.object_id = OBJECT_ID('dbo.FactSalesColumnStore')
+  AND rg.deleted_rows > 0
+ORDER BY PctDeleted DESC;
+GO
+
+-- ── 19.9  Verify all partition functions and their table usage ─────────────────
+SELECT
+    pf.name                          AS PartitionFunction,
+    ps.name                          AS PartitionScheme,
+    OBJECT_NAME(i.object_id)         AS TableName,
+    i.name                           AS IndexName,
+    pf.fanout                        AS Partitions,
+    SUM(p.rows)                      AS TotalRows
+FROM sys.partition_functions   pf
+JOIN sys.partition_schemes     ps ON pf.function_id   = ps.function_id
+JOIN sys.indexes               i  ON ps.data_space_id = i.data_space_id
+JOIN sys.partitions            p  ON i.object_id      = p.object_id
+                                 AND i.index_id       = p.index_id
+GROUP BY pf.name, ps.name, i.object_id, i.name, pf.fanout
+ORDER BY pf.name, TableName;
+GO
+
+/* ============================================================================
+   MODULE 20 — REAL-WORLD SCENARIO CHECKLISTS & QUICK REFERENCE
+   ============================================================================ */
+/*
+──────────────────────────────────────────────────────────────────────────────
+  DECISION GUIDE: Should I partition this table?
+──────────────────────────────────────────────────────────────────────────────
+  YES — Partition when:
+      • Table > 10 GB and growing
+      • Queries naturally filter on a date/range column
+      • You need rolling archival (delete old data in bulk)
+      • You need fast bulk load (SWITCH IN pattern)
+      • Different compression levels needed per data age
+      • Parallel index operations per partition required
+      • Per-partition filegroup backup strategy needed
+
+  NO — Don't partition when:
+      • Table is < 1 GB
+      • Queries don't filter on partition key
+      • You need to partition by a non-deterministic column
+      • Partition key has very low cardinality (< 10 distinct values)
+      • Your partition count would exceed 1000 (use fewer, larger partitions)
+
+──────────────────────────────────────────────────────────────────────────────
+  PARTITION FUNCTION TYPE GUIDE
+──────────────────────────────────────────────────────────────────────────────
+  RANGE RIGHT (recommended for dates):
+      Boundary '2023-01-01' → partition starts ON that date
+      Use: yearly/monthly/daily date partitions
+
+  RANGE LEFT:
+      Boundary '2022-12-31' → partition ends ON that date (inclusive)
+      Use: end-of-period boundary style
+
+──────────────────────────────────────────────────────────────────────────────
+  FILEGROUP STRATEGY
+──────────────────────────────────────────────────────────────────────────────
+  Dev/Test  : ALL TO [PRIMARY] — simplest, no setup needed
+  Prod Small: 2-3 FGs (HOT / WARM / COLD)
+  Prod Large: 1 FG per partition (separate drives, parallel I/O, FG backup)
+
+──────────────────────────────────────────────────────────────────────────────
+  COMPRESSION GUIDE PER PARTITION AGE
+──────────────────────────────────────────────────────────────────────────────
+  Current month (HOT) : NONE      — fastest writes/reads
+  Last 6-12 months    : ROW       — 30-50% space saving, low overhead
+  Older (WARM)        : PAGE      — 60-80% space saving
+  Archive (COLD)      : COLUMNSTORE or PAGE — maximum compression
+
+──────────────────────────────────────────────────────────────────────────────
+  SLIDING WINDOW CHECKLIST (run monthly)
+──────────────────────────────────────────────────────────────────────────────
+  □ 1. Create staging table for new month
+  □ 2. Set NEXT USED on partition scheme
+  □ 3. SPLIT to create new empty partition
+  □ 4. Load ETL data into staging table
+  □ 5. Validate row counts and CHECK constraints in staging
+  □ 6. SWITCH IN staging → production
+  □ 7. Verify new partition has expected row count
+  □ 8. SWITCH OUT oldest partition → archive table
+  □ 9. Apply PAGE compression to archived partition
+  □ 10. MERGE the now-empty old boundary
+  □ 11. Update statistics (incremental)
+  □ 12. Log completion and row counts
+
+──────────────────────────────────────────────────────────────────────────────
+  SWITCH REQUIREMENTS CHECKLIST
+──────────────────────────────────────────────────────────────────────────────
+  □ Source and destination same column structure & types
+  □ All indexes aligned (same partition function) OR pre-dropped
+  □ Source/destination on same filegroup as target partition
+  □ CHECK constraint on source/destination matching partition range
+  □ No non-aligned indexes (or disabled/dropped before switch)
+  □ No foreign keys referencing source table (or disabled)
+  □ Not a system-versioned temporal table (special handling needed)
+
+──────────────────────────────────────────────────────────────────────────────
+  SQL SERVER VERSION FEATURES (2019–2025)
+──────────────────────────────────────────────────────────────────────────────
+  2019: Accelerated Database Recovery (ADR) helps large partition ops
+        Batch mode on rowstore (helps analytical queries on partitioned tables)
+        Max partitions: 15,000
+
+  2022: Ledger tables (append-only + partitioning compatible)
+        Contained Availability Groups
+        Query Store hints (force partition elimination plan)
+
+  2025: Enhanced parallel partition operations
+        Improved incremental statistics accuracy
+        Better partition pruning for non-sargable predicates (improvements)
+
+──────────────────────────────────────────────────────────────────────────────
+  USEFUL SYSTEM OBJECTS FOR PARTITIONING
+──────────────────────────────────────────────────────────────────────────────
+  sys.partition_functions          — all partition functions
+  sys.partition_range_values       — boundary values
+  sys.partition_schemes            — partition schemes
+  sys.destination_data_spaces      — scheme → filegroup mapping
+  sys.partitions                   — partition metadata per object
+  sys.allocation_units             — size info per partition
+  sys.dm_db_index_physical_stats   — fragmentation per partition
+  sys.column_store_row_groups      — columnstore delta store per partition
+  sys.dm_db_stats_properties_internal — per-partition stats info
+  $PARTITION.function_name(value)  — which partition does this value go to?
+*/
+
+-- ── 20.1  Golden diagnostic query: full partition inventory ──────────────────
+SELECT
+    SCHEMA_NAME(t.schema_id)          AS SchemaName,
+    t.name                             AS TableName,
+    pf.name                            AS PartitionFunction,
+    ps.name                            AS PartitionScheme,
+    p.partition_number                 AS PartNum,
+    CAST(prv.value AS NVARCHAR(50))    AS BoundaryValue,
+    p.rows                             AS RowCount,
+    CAST(au.total_pages * 8.0 / 1024  AS DECIMAL(10,2)) AS TotalMB,
+    CAST(au.used_pages  * 8.0 / 1024  AS DECIMAL(10,2)) AS UsedMB,
+    fg.name                            AS FileGroup,
+    p.data_compression_desc            AS Compression
+FROM sys.tables                  t
+JOIN sys.indexes                 i   ON t.object_id     = i.object_id AND i.index_id <= 1
+JOIN sys.partition_schemes       ps  ON i.data_space_id = ps.data_space_id
+JOIN sys.partition_functions     pf  ON ps.function_id  = pf.function_id
+JOIN sys.partitions              p   ON i.object_id     = p.object_id AND i.index_id = p.index_id
+JOIN sys.allocation_units        au  ON p.partition_id  = au.container_id
+LEFT JOIN sys.partition_range_values prv
+    ON pf.function_id = prv.function_id
+    AND p.partition_number = CASE pf.boundary_value_on_right WHEN 1 THEN prv.boundary_id + 1
+                                                              ELSE prv.boundary_id END
+JOIN sys.destination_data_spaces dds ON ps.data_space_id = dds.partition_scheme_id
+    AND dds.destination_id = p.partition_number
+JOIN sys.filegroups              fg  ON dds.data_space_id = fg.data_space_id
+ORDER BY t.name, p.partition_number;
+GO
+
+/*
+================================================================================
+  END OF GUIDE
+  SQL Server Table Partitioning — Basics to Advanced
+  Version: SQL Server 2019–2025
+================================================================================
+*/
